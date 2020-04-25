@@ -256,6 +256,9 @@ struct frame
      be used for output.  */
   bool_bf glyphs_initialized_p : 1;
 
+  int bgexi_background_pixmap_initialized_p;
+  int bgexi_background_pixmap_p;
+
   /* Set to true in change_frame_size when size of frame changed
      Clear the frame in clear_garbaged_frames if set.  */
   bool_bf resized_p : 1;

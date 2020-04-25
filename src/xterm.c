@@ -235,6 +235,17 @@ static void x_initialize (void);
 
 static bool x_get_current_wm_state (struct frame *, Window, int *, bool *);
 
+extern bool expose_window (struct window *w, const Emacs_Rectangle *fr);
+extern int bgexi_p (int bgexid);
+extern int bgexi_fast_p (void);
+extern int bgexi_only_fast_p (void);
+extern int bgexi_get_dynamic_color_flag (int bgexid);
+extern int bgexi_get_enable_bgexid (struct window *window);
+extern int bgexi_special_trigger_p (struct window *window);
+extern int bgexi_clear_special_trigger_p (void);
+extern int bgexi_fill_rectangle (GC gc, struct window *window,
+                                 int x, int y, int w, int h, int *rgba);
+extern void bgexi_set_overstrike_flag (int overstrike_p);
 /* Flush display of frame F.  */
 
 static void
@@ -648,7 +659,7 @@ x_cr_draw_frame (cairo_t *cr, struct frame *f)
 
   cairo_t *saved_cr = FRAME_CR_CONTEXT (f);
   FRAME_CR_CONTEXT (f) = cr;
-  x_clear_area (f, 0, 0, width, height);
+  x_clear_area (0, f, 0, 0, width, height);
   expose_frame (f, 0, 0, width, height);
   FRAME_CR_CONTEXT (f) = saved_cr;
 }
@@ -731,7 +742,7 @@ x_cr_export_frames (Lisp_Object frames, cairo_surface_type_t surface_type)
     {
       cairo_t *saved_cr = FRAME_CR_CONTEXT (f);
       FRAME_CR_CONTEXT (f) = cr;
-      x_clear_area (f, 0, 0, width, height);
+      x_clear_area (0, f, 0, 0, width, height);
       expose_frame (f, 0, 0, width, height);
       FRAME_CR_CONTEXT (f) = saved_cr;
 
@@ -871,7 +882,7 @@ x_clear_window (struct frame *f)
   x_end_cr_clip (f);
 #else
   if (FRAME_X_DOUBLE_BUFFERED_P (f))
-    x_clear_area (f, 0, 0, FRAME_PIXEL_WIDTH (f), FRAME_PIXEL_HEIGHT (f));
+    x_clear_area (0, f, 0, 0, FRAME_PIXEL_WIDTH (f), FRAME_PIXEL_HEIGHT (f));
   else
     XClearWindow (FRAME_X_DISPLAY (f), FRAME_X_WINDOW (f));
 #endif
@@ -1315,10 +1326,10 @@ x_clear_under_internal_border (struct frame *f)
 	}
       else
 	{
-	  x_clear_area (f, 0, 0, border, height);
-	  x_clear_area (f, 0, margin, width, border);
-	  x_clear_area (f, width - border, 0, border, height);
-	  x_clear_area (f, 0, height - border, width, border);
+	  x_clear_area (0, f, 0, 0, border, height);
+	  x_clear_area (0, f, 0, margin, width, border);
+	  x_clear_area (0, f, width - border, 0, border, height);
+	  x_clear_area (0, f, 0, height - border, width, border);
 	}
 
       unblock_input ();
@@ -1380,8 +1391,8 @@ x_after_update_window_line (struct window *w, struct glyph_row *desired_row)
 	  }
 	else
 	  {
-	    x_clear_area (f, 0, y, width, height);
-	    x_clear_area (f, FRAME_PIXEL_WIDTH (f) - width, y, width, height);
+	    x_clear_area (w, f, 0, y, width, height);
+	    x_clear_area (w, f, FRAME_PIXEL_WIDTH (f) - width, y, width, height);
 	  }
 	unblock_input ();
       }
@@ -1732,7 +1743,63 @@ x_clear_glyph_string_rect (struct glyph_string *s, int x, int y, int w, int h)
   XGCValues xgcv;
   XGetGCValues (display, s->gc, GCForeground | GCBackground, &xgcv);
   XSetForeground (display, s->gc, xgcv.background);
-  x_fill_rectangle (s->f, s->gc, x, y, w, h);
+  if (bgexi_p (-1))
+    {
+      int enable_bgexid = bgexi_get_enable_bgexid (s->w);
+      if (bgexi_fast_p () &&
+          (enable_bgexid == 0) &&
+          !bgexi_get_dynamic_color_flag (0))
+        {
+          if (FRAME_BACKGROUND_PIXEL (s->f) == xgcv.background)
+            {
+              bgexi_fill_rectangle (s->gc, s->w, x, y, w, h, 0);
+            }
+          else
+            {
+              x_fill_rectangle (s->f, s->gc, x, y, w, h);
+            }
+        }
+      else
+        {
+          int flag = 1;
+
+          if (FRAME_BACKGROUND_PIXEL (s->f) == xgcv.background)
+            {
+              if (bgexi_fast_p () &&
+                  (enable_bgexid == 0) &&
+                  bgexi_get_dynamic_color_flag (0))
+                {
+                  bgexi_fill_rectangle (s->gc, s->w, x, y, w, h, 0);
+                  flag = 0;
+                }
+              else
+                {
+                  flag = bgexi_fill_rectangle (s->gc, s->w, x, y, w, h, 0);
+                }
+            }
+          else
+            {
+              int rgba[4];
+              XColor xcolor;
+              xcolor.pixel = xgcv.background;
+              XQueryColor (display, FRAME_X_COLORMAP (s->f), &xcolor);
+              rgba[0] = xcolor.red;
+              rgba[1] = xcolor.green;
+              rgba[2] = xcolor.blue;
+              rgba[3] = 0;
+              flag = bgexi_fill_rectangle (s->gc, s->w, x, y, w, h, rgba);
+            }
+
+          if (flag)
+            {
+              x_fill_rectangle (s->f, s->gc, x, y, w, h);
+            }
+        }
+    }
+  else
+    {
+      x_fill_rectangle (s->f, s->gc, x, y, w, h);
+    }
   XSetForeground (display, s->gc, xgcv.foreground);
 }
 
@@ -1833,7 +1900,11 @@ x_draw_glyph_string_foreground (struct glyph_string *s)
 	  else
 	    font->driver->draw (s, 0, s->nchars, x, y, true);
 	  if (s->face->overstrike)
-	    font->driver->draw (s, 0, s->nchars, x + 1, y, false);
+            {
+              bgexi_set_overstrike_flag (1);
+              font->driver->draw (s, 0, s->nchars, x + 1, y, false);
+              bgexi_set_overstrike_flag (0);
+            }
 #ifdef USE_CAIRO
 	  if (EQ (font->driver->type, Qx))
 	    x_end_cr_xlib_drawable (s->f, s->gc);
@@ -4061,15 +4132,44 @@ x_delete_glyphs (struct frame *f, int n)
    If they are <= 0, this is probably an error.  */
 
 static ATTRIBUTE_UNUSED void
-x_clear_area1 (Display *dpy, Window window,
+x_clear_area1 (struct window* emacs_window,
+               Display *dpy, Window window,
                int x, int y, int width, int height, int exposures)
 {
   eassert (width > 0 && height > 0);
-  XClearArea (dpy, window, x, y, width, height, exposures);
+  if (bgexi_p (-1))
+    {
+      GC gc;
+
+      gc = XCreateGC (dpy, window, 0, 0);
+
+      if (bgexi_fill_rectangle (gc, emacs_window,
+                                x, y, width, height, 0))
+        {
+          XClearArea (dpy, window, x, y, width, height, exposures);
+        }
+
+      XFreeGC (dpy, gc);
+    }
+  else
+    {
+      if (emacs_window && bgexi_special_trigger_p (emacs_window))
+        {
+          GC gc;
+
+          gc = XCreateGC (dpy, window, 0, 0);
+          bgexi_fill_rectangle (gc, emacs_window,
+                                0, 0, 1, 1, 0);
+          XFreeGC (dpy, gc);
+
+          bgexi_clear_special_trigger_p ();
+        }
+      XClearArea (dpy, window, x, y, width, height, exposures);
+    }
 }
 
 void
-x_clear_area (struct frame *f, int x, int y, int width, int height)
+x_clear_area (struct window* emacs_window, struct frame *f, int x, int y, int width, int height)
 {
 #ifdef USE_CAIRO
   cairo_t *cr;
@@ -4083,12 +4183,34 @@ x_clear_area (struct frame *f, int x, int y, int width, int height)
   x_end_cr_clip (f);
 #else
   if (FRAME_X_DOUBLE_BUFFERED_P (f))
-    XFillRectangle (FRAME_X_DISPLAY (f),
-		    FRAME_X_DRAWABLE (f),
-		    f->output_data.x->reverse_gc,
-		    x, y, width, height);
+    {
+      if (bgexi_p (-1))
+        {
+          x_clear_area1 (emacs_window, FRAME_X_DISPLAY (f), FRAME_X_WINDOW (f),
+                         x, y, width, height, False);
+        }
+      else
+        {
+          if (emacs_window && bgexi_special_trigger_p (emacs_window))
+            {
+              struct frame *f = XFRAME (WINDOW_FRAME (emacs_window));
+              GC gc;
+
+              gc = XCreateGC (FRAME_X_DISPLAY (f), FRAME_X_DRAWABLE (f), 0, 0);
+              bgexi_fill_rectangle (gc, emacs_window,
+                                    0, 0, 1, 1, 0);
+              XFreeGC (FRAME_X_DISPLAY (f), gc);
+
+              bgexi_clear_special_trigger_p ();
+            }
+          XFillRectangle (FRAME_X_DISPLAY (f),
+                          FRAME_X_DRAWABLE (f),
+                          f->output_data.x->reverse_gc,
+                          x, y, width, height);
+        }
+    }
   else
-    x_clear_area1 (FRAME_X_DISPLAY (f), FRAME_X_WINDOW (f),
+    x_clear_area1 (emacs_window, FRAME_X_DISPLAY (f), FRAME_X_WINDOW (f),
                    x, y, width, height, False);
 #endif
 }
@@ -4458,12 +4580,27 @@ x_scroll_run (struct window *w, struct run *run)
     }
   else
 #endif	/* USE_CAIRO */
-    XCopyArea (FRAME_X_DISPLAY (f),
-	       FRAME_X_DRAWABLE (f), FRAME_X_DRAWABLE (f),
-	       f->output_data.x->normal_gc,
-	       x, from_y,
-	       width, height,
-	       x, to_y);
+    if (!bgexi_p (-1))
+      {
+        Drawable drawable_a = FRAME_X_DRAWABLE (f);
+        Drawable drawable_b = FRAME_X_DRAWABLE (f);
+        XCopyArea (FRAME_X_DISPLAY (f),
+                   drawable_a, drawable_b,
+                   f->output_data.x->normal_gc,
+                   x, from_y,
+                   width, height,
+                   x, to_y);
+      }
+    else
+      {
+        Emacs_Rectangle r;
+        r.x = 0;
+        r.y = (from_y < to_y) ? from_y : to_y;
+        r.width = width;
+        r.height = height + abs(from_y - to_y);
+        w->must_be_updated_p = 1;
+        expose_window (w, &r);
+      }
 
   unblock_input ();
 }
@@ -6764,7 +6901,7 @@ x_scroll_bar_create (struct window *w, int top, int left,
        for the case that a window has been split horizontally.  In
        this case, no clear_frame is generated to reduce flickering.  */
     if (width > 0 && window_box_height (w) > 0)
-      x_clear_area (f, left, top, width, window_box_height (w));
+      x_clear_area (w, f, left, top, width, window_box_height (w));
 
     window = XCreateWindow (FRAME_X_DISPLAY (f), FRAME_X_WINDOW (f),
 			    /* Position and size of scroll bar.  */
@@ -6900,10 +7037,10 @@ x_scroll_bar_set_handle (struct scroll_bar *bar, int start, int end,
     /* Draw the empty space above the handle.  Note that we can't clear
        zero-height areas; that means "clear to end of window."  */
     if ((inside_width > 0) && (start > 0))
-      x_clear_area1 (FRAME_X_DISPLAY (f), w,
-		    VERTICAL_SCROLL_BAR_LEFT_BORDER,
-		    VERTICAL_SCROLL_BAR_TOP_BORDER,
-		    inside_width, start, False);
+      x_clear_area1 (0, FRAME_X_DISPLAY (f), w,
+                     VERTICAL_SCROLL_BAR_LEFT_BORDER,
+                     VERTICAL_SCROLL_BAR_TOP_BORDER,
+                     inside_width, start, False);
 
     /* Change to proper foreground color if one is specified.  */
     if (f->output_data.x->scroll_bar_foreground_pixel != -1)
@@ -6925,10 +7062,10 @@ x_scroll_bar_set_handle (struct scroll_bar *bar, int start, int end,
     /* Draw the empty space below the handle.  Note that we can't
        clear zero-height areas; that means "clear to end of window." */
     if ((inside_width > 0) && (end < inside_height))
-      x_clear_area1 (FRAME_X_DISPLAY (f), w,
-		    VERTICAL_SCROLL_BAR_LEFT_BORDER,
-		    VERTICAL_SCROLL_BAR_TOP_BORDER + end,
-		    inside_width, inside_height - end, False);
+      x_clear_area1 (0, FRAME_X_DISPLAY (f), w,
+                     VERTICAL_SCROLL_BAR_LEFT_BORDER,
+                     VERTICAL_SCROLL_BAR_TOP_BORDER + end,
+                     inside_width, inside_height - end, False);
   }
 
   unblock_input ();
@@ -6992,7 +7129,7 @@ XTset_vertical_scroll_bar (struct window *w, int portion, int whole, int positio
       if (width > 0 && height > 0)
 	{
 	  block_input ();
-          x_clear_area (f, left, top, width, height);
+          x_clear_area (w, f, left, top, width, height);
 	  unblock_input ();
 	}
 
@@ -7024,7 +7161,7 @@ XTset_vertical_scroll_bar (struct window *w, int portion, int whole, int positio
 	  /* Since toolkit scroll bars are smaller than the space reserved
 	     for them on the frame, we have to clear "under" them.  */
 	  if (width > 0 && height > 0)
-	    x_clear_area (f, left, top, width, height);
+	    x_clear_area (w, f, left, top, width, height);
 #ifdef USE_GTK
           xg_update_scrollbar_pos (f, bar->x_window, top,
 				   left, width, max (height, 1));
@@ -7110,7 +7247,7 @@ XTset_horizontal_scroll_bar (struct window *w, int portion, int whole, int posit
 
 	  /* Clear also part between window_width and
 	     WINDOW_PIXEL_WIDTH.  */
-	  x_clear_area (f, left, top, pixel_width, height);
+	  x_clear_area (w, f, left, top, pixel_width, height);
 	  unblock_input ();
 	}
 
@@ -7141,7 +7278,7 @@ XTset_horizontal_scroll_bar (struct window *w, int portion, int whole, int posit
 	  /* Since toolkit scroll bars are smaller than the space reserved
 	     for them on the frame, we have to clear "under" them.  */
 	  if (width > 0 && height > 0)
-	    x_clear_area (f,
+	    x_clear_area (w, f,
 			  WINDOW_LEFT_EDGE_X (w), top,
 			  pixel_width - WINDOW_RIGHT_DIVIDER_WIDTH (w), height);
 #ifdef USE_GTK
@@ -7162,7 +7299,7 @@ XTset_horizontal_scroll_bar (struct window *w, int portion, int whole, int posit
 	int area_height = WINDOW_CONFIG_SCROLL_BAR_HEIGHT (w);
 	int rest = area_height - height;
 	if (rest > 0 && width > 0)
-	  x_clear_area (f, left, top, width, rest);
+	  x_clear_area (w, f, left, top, width, rest);
       }
 
       /* Move/size the scroll bar window.  */
@@ -8244,6 +8381,7 @@ handle_one_xevent (struct x_display_info *dpyinfo,
                  the frame, so we'll redraw the whole thing on next
                  redisplay anyway.  Yuck.  */
               x_clear_area1 (
+                0,
                 FRAME_X_DISPLAY (f),
                 FRAME_X_WINDOW (f),
                 event->xexpose.x, event->xexpose.y,
@@ -8259,7 +8397,7 @@ handle_one_xevent (struct x_display_info *dpyinfo,
 #ifdef USE_GTK
               /* This seems to be needed for GTK 2.6 and later, see
                  https://debbugs.gnu.org/cgi/bugreport.cgi?bug=15398.  */
-              x_clear_area (f,
+              x_clear_area (0, f,
                             event->xexpose.x, event->xexpose.y,
                             event->xexpose.width, event->xexpose.height);
 #endif
@@ -9654,9 +9792,9 @@ x_define_frame_cursor (struct frame *f, Emacs_Cursor cursor)
 /* RIF: Clear area on frame F.  */
 
 static void
-x_clear_frame_area (struct frame *f, int x, int y, int width, int height)
+x_clear_frame_area (struct window *w, struct frame *f, int x, int y, int width, int height)
 {
-  x_clear_area (f, x, y, width, height);
+  x_clear_area (w, f, x, y, width, height);
 }
 
 
